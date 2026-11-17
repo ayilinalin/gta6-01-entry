@@ -4,7 +4,7 @@
 // Run twice: both runs must produce byte-identical output.
 //   MAKEFUN_OUTPUT_DIR=out node main.ts
 import { buildDossier } from './vendor/makefun-game.ts';
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,9 +27,14 @@ function copyTree(name) {
   cpSync(src, join(outDir, name), { recursive: true });
 }
 
-// Fresh output directory every run, so stale files can never leak into a dossier.
-rmSync(outDir, { recursive: true, force: true });
+// Fresh output directory contents every run, so stale files can never leak
+// into a dossier. Clear the CONTENTS only — never remove outDir itself:
+// the grader mounts /output as a volume, and removing a mount point fails
+// with EBUSY (-4094), killing the run.
 mkdirSync(outDir, { recursive: true });
+for (const entry of readdirSync(outDir)) {
+  rmSync(join(outDir, entry), { recursive: true, force: true });
+}
 copyTree('game');
 copyTree('screenshots');
 
