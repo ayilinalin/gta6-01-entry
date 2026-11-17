@@ -1,97 +1,80 @@
-// Police: the Port Meridian Police Department. Wanted level 0-5 rises when
-// the player steals, hits people or shoots; it decays when the player lies
-// low. Cops chase, ram, and at wanted 4+ set roadblocks ahead of the player.
-// Getting busted at high wanted ends the run.
-import { CONFIG } from './config.js';
-import { clamp, dist, angleDiff, range } from './random.js';
-import { makeCar } from './vehicles.js';
+// PMPD: wanted level 0-5, pursuit cars that ram the player, roadblocks at high heat.
+import { TUNE, WANTED_LABELS, WORLD } from './config.js';
+import { makeRng, pick, clamp, dist, angleDiff } from './random.js';
+import { makeCar, drawCar } from './vehicles.js';
+import { ROADS_X, ROADS_Y } from './city.js';
 
-export function createWanted() {
-  return { level: 0, heat: 0, decayTimer: 0 };
+export function makePolice() {
+  return { wanted: 0, heat: 0, cops: [], roadblocks: [], spawnTimer: 0, sirenPhase: 0 };
 }
 
-export function addHeat(wanted, amount) {
-  wanted.heat += amount;
-  const next = Math.min(5, Math.floor(wanted.heat / 25));
-  if (next > wanted.level) wanted.level = next;
-  wanted.decayTimer = CONFIG.wantedDecaySeconds;
+export function addHeat(police, amount) {
+  police.heat = clamp(police.heat + amount, 0, 5);
+  police.wanted = Math.floor(police.heat + 0.0001);
 }
 
-export function updateWanted(wanted, dt) {
-  if (wanted.level === 0) return;
-  wanted.decayTimer -= dt;
-  if (wanted.decayTimer <= 0) {
-    wanted.heat = Math.max(0, wanted.heat - 8);
-    wanted.level = Math.min(5, Math.floor(wanted.heat / 25));
-    wanted.decayTimer = 3;
+export function updatePolice(police, dt, target, rng) {
+  police.wanted = Math.floor(police.heat + 0.0001);
+  police.sirenPhase += dt * 6;
+  // Heat cools off slowly when the player stays clean.
+  police.heat = Math.max(0, police.heat - TUNE.wantedDecay * dt);
+  const wantCops = police.wanted === 0 ? 0 : Math.min(2 + police.wanted, 7);
+  police.spawnTimer -= dt;
+  if (police.cops.length < wantCops && police.spawnTimer <= 0) {
+    police.spawnTimer = 1.4;
+    const ang = rng() * Math.PI * 2;
+    const d = 620;
+    const cop = makeCar(
+      clamp(target.x + Math.cos(ang) * d, 40, WORLD.w - 40),
+      clamp(target.y + Math.sin(ang) * d, 40, WORLD.h - 40),
+      0, '#e8e8e8', 'cop');
+    cop.speed = TUNE.copSpeed * 0.8;
+    police.cops.push(cop);
+  }
+  // Pursuit: steer at the target, ram on contact, give up when heat is gone.
+  for (const cop of police.cops) {
+    const want = Math.atan2(target.y - cop.y, target.x - cop.x);
+    cop.angle += clamp(angleDiff(cop.angle, want), -2.4 * dt, 2.4 * dt);
+    const spd = police.wanted >= 4 ? TUNE.copSpeed * 1.25 : TUNE.copSpeed;
+    cop.speed += (spd - cop.speed) * dt * 0.8;
+    cop.x += Math.cos(cop.angle) * cop.speed * dt;
+    cop.y += Math.sin(cop.angle) * cop.speed * dt;
+    cop.x = clamp(cop.x, 24, WORLD.w - 24);
+    cop.y = clamp(cop.y, 24, WORLD.h - 24);
+  }
+  police.cops = police.cops.filter((c) => police.wanted > 0 || dist(c.x, c.y, target.x, target.y) < 900);
+  // Roadblocks: two parked cop cars across the road ahead of the player.
+  const wantBlocks = police.wanted >= 4 ? police.wanted - 3 : 0;
+  while (police.roadblocks.length < wantBlocks) {
+    const a = rng() * Math.PI * 2;
+    police.roadblocks.push({
+      x: clamp(target.x + Math.cos(a) * 420, 60, WORLD.w - 60),
+      y: clamp(target.y + Math.sin(a) * 420, 60, WORLD.h - 60),
+      angle: a + Math.PI / 2,
+    });
+  }
+  if (police.roadblocks.length > wantBlocks) police.roadblocks.length = wantBlocks;
+}
+
+export function drawPolice(ctx, police, cam) {
+  for (const cop of police.cops) {
+    drawCar(ctx, cop, cam);
+    // World coordinates: the caller translates the context by -cam.
+    const sx = cop.x, sy = cop.y;
+    if (sx < cam.x - 60 || sx > cam.x + cam.w + 60 || sy < cam.y - 60 || sy > cam.y + cam.h + 60) continue;
+    const on = Math.sin(police.sirenPhase) > 0;
+    ctx.fillStyle = on ? '#ff3b30' : '#2f6df6';
+    ctx.beginPath(); ctx.arc(sx, sy - 16, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = on ? '#2f6df6' : '#ff3b30';
+    ctx.beginPath(); ctx.arc(sx + 10, sy - 16, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const rb of police.roadblocks) {
+    const c1 = { x: rb.x - Math.cos(rb.angle) * 26, y: rb.y - Math.sin(rb.angle) * 26, angle: rb.angle, color: '#e8e8e8', kind: 'cop' };
+    const c2 = { x: rb.x + Math.cos(rb.angle) * 26, y: rb.y + Math.sin(rb.angle) * 26, angle: rb.angle, color: '#e8e8e8', kind: 'cop' };
+    drawCar(ctx, c1, cam); drawCar(ctx, c2, cam);
+    ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('ROADBLOCK', rb.x, rb.y - 26);
   }
 }
 
-export function wantedTargetCops(level) {
-  return [0, 1, 2, 3, 5, 7][level] || 0;
-}
-
-export function spawnPoliceCar(player, rng) {
-  const angle = range(rng, 0, Math.PI * 2);
-  const d = 420;
-  const x = clamp(player.x + Math.cos(angle) * d, 60, CONFIG.worldWidth - 60);
-  const y = clamp(player.y + Math.sin(angle) * d, 60, CONFIG.worldHeight - 60);
-  const car = makeCar(x, y, 0, { rng, police: true, cruiseSpeed: 300, name: 'PMPD Interceptor' });
-  car.sirenOn = true;
-  return car;
-}
-
-export function updatePoliceCar(car, player, dt) {
-  const targetAngle = Math.atan2(player.y - car.y, player.x - car.x);
-  const diff = angleDiff(car.angle, targetAngle);
-  car.angle += clamp(diff, -2.8 * dt, 2.8 * dt);
-  const d = dist(car.x, car.y, player.x, player.y);
-  const targetSpeed = d > 260 ? 430 : d > 90 ? 340 : 200;
-  car.speed += clamp(targetSpeed - car.speed, -500 * dt, 320 * dt);
-  car.x += Math.cos(car.angle) * car.speed * dt;
-  car.y += Math.sin(car.angle) * car.speed * dt;
-  return d;
-}
-
-// A roadblock: two parked police cars across the road ahead of the player.
-export function makeRoadblock(player, rng) {
-  const ahead = 320;
-  const bx = player.x + Math.cos(player.angle || 0) * ahead;
-  const by = player.y + Math.sin(player.angle || 0) * ahead;
-  const perp = (player.angle || 0) + Math.PI / 2;
-  const cars = [];
-  for (const off of [-46, 46]) {
-    const car = makeCar(bx + Math.cos(perp) * off, by + Math.sin(perp) * off, perp, { rng, police: true, name: 'PMPD Roadblock' });
-    car.sirenOn = true;
-    car.speed = 0;
-    car.roadblock = true;
-    cars.push(car);
-  }
-  return { x: bx, y: by, cars, timer: 25 };
-}
-
-export function updateRoadblock(block, dt) {
-  block.timer -= dt;
-  return block.timer > 0;
-}
-
-export function drawWantedStars(ctx, level, x, y) {
-  for (let i = 0; i < 5; i++) {
-    ctx.fillStyle = i < level ? '#ffd94d' : 'rgba(255,255,255,0.25)';
-    drawStar(ctx, x + i * 26, y, 11);
-  }
-}
-
-export function drawStar(ctx, cx, cy, r) {
-  ctx.beginPath();
-  for (let i = 0; i < 10; i++) {
-    const ang = (i * Math.PI) / 5 - Math.PI / 2;
-    const rad = i % 2 === 0 ? r : r * 0.45;
-    const px = cx + Math.cos(ang) * rad;
-    const py = cy + Math.sin(ang) * rad;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.fill();
-}
+export function wantedLabel(w) { return WANTED_LABELS[clamp(w, 0, 5)]; }

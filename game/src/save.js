@@ -1,40 +1,26 @@
-// Save / load via localStorage: cash, reputation, missions done, and the
-// player's last position. One slot, auto-saved on mission completion.
-import { CONFIG } from './config.js';
+// Save: one localStorage slot — money, missions done, reputation, player spot.
+const KEY = 'neon-tide-save-v2';
 
 export function loadSave() {
   try {
-    const raw = localStorage.getItem(CONFIG.saveKey);
+    const raw = localStorage.getItem(KEY);
     if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number') return null;
-    return data;
-  } catch (e) {
-    return null;
-  }
+    const s = JSON.parse(raw);
+    if (typeof s.money !== 'number' || typeof s.missionsDone !== 'number') return null;
+    return s;
+  } catch (e) { return null; }
 }
 
-export function saveGame(player, missions) {
+export function writeSave(world) {
   try {
-    localStorage.setItem(CONFIG.saveKey, JSON.stringify({
-      cash: player.cash,
-      reputation: player.reputation,
-      missionsDone: missions.done,
-      missionIndex: missions.index,
-      x: Math.round(player.x),
-      y: Math.round(player.y),
+    localStorage.setItem(KEY, JSON.stringify({
+      money: world.money, rep: world.rep, missionsDone: world.missions.done,
+      missionIndex: world.missions.index, x: world.player.x, y: world.player.y,
       savedAt: Date.now(),
     }));
-    return true;
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { /* storage full or blocked: progress just is not kept */ }
 }
 
 export function clearSave() {
-  try {
-    localStorage.removeItem(CONFIG.saveKey);
-  } catch (e) {
-    // Storage unavailable — the game still runs, it just cannot save.
-  }
+  try { localStorage.removeItem(KEY); } catch (e) {}
 }

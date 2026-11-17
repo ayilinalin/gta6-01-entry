@@ -1,76 +1,69 @@
-// Pedestrians: Port Meridian locals strolling the sidewalks. They walk
-// their block, panic and run when shots ring out or a car bears down,
-// and remember being shoved.
-import { CONFIG } from './config.js';
-import { clamp, dist, pick, range } from './random.js';
-import { collideBuildings } from './city.js';
+// Pedestrians: harmless walkers on the sidewalks, they flee from gunfire and cars.
+import { TUNE, PALETTE, WORLD } from './config.js';
+import { makeRng, pick, range, dist, clamp } from './random.js';
+import { ROADS_X, ROADS_Y, roadCenterX, roadCenterY } from './city.js';
 
-const SHIRTS = ['#e86a6a', '#6aa8e8', '#e8d44d', '#9e6ae8', '#6ae8a0', '#e8e8e8', '#f28c28'];
-const NAMES = ['Mira', 'Dono', 'Sari', 'Bima', 'Lestari', 'Agus', 'Rani', 'Fajar', 'Nadia', 'Eko'];
-
-export function spawnPedestrians(city, rng, count) {
+export function spawnPedestrians(n, rng) {
   const peds = [];
-  for (let i = 0; i < count; i++) {
-    const rx = city.roadsX[Math.floor(rng() * city.roadsX.length)];
-    const ry = city.roadsY[Math.floor(rng() * city.roadsY.length)];
-    const onVertical = rng() < 0.5;
-    const x = onVertical ? rx + CONFIG.roadWidth / 2 + 16 : range(rng, 80, CONFIG.worldWidth - 80);
-    const y = onVertical ? range(rng, 80, city.harborY - 80) : ry + CONFIG.roadWidth / 2 + 16;
+  const shirts = ['#e84a5f', '#4a90e8', '#f2a541', '#7bc96f', '#9b59b6', '#e8e8e8', '#ff7a2e'];
+  for (let i = 0; i < n; i++) {
+    const vertical = rng() < 0.5;
+    const x = vertical ? pick(rng, ROADS_X) + range(rng, -8, WORLD.roadW + 8) : range(rng, 40, WORLD.w - 40);
+    const y = vertical ? range(rng, 40, WORLD.h - 40) : pick(rng, ROADS_Y) + range(rng, -8, WORLD.roadW + 8);
     peds.push({
-      x, y,
-      angle: range(rng, 0, Math.PI * 2),
-      speed: range(rng, 28, 55),
-      shirt: pick(rng, SHIRTS),
-      name: pick(rng, NAMES),
-      panic: 0,
-      wanderTimer: range(rng, 1, 4),
+      x, y, r: 9, angle: rng() * Math.PI * 2,
+      speed: range(rng, TUNE.pedSpeed * 0.7, TUNE.pedSpeed * 1.3),
+      shirt: pick(rng, shirts), skin: pick(rng, PALETTE.pedSkin),
+      panic: 0, walkPhase: rng() * Math.PI * 2,
     });
   }
   return peds;
 }
 
-export function updatePedestrian(ped, city, threat, dt) {
-  const d = threat ? dist(ped.x, ped.y, threat.x, threat.y) : Infinity;
-  if (threat && d < 220) {
-    ped.panic = 2.5;
-    ped.angle = Math.atan2(ped.y - threat.y, ped.x - threat.x);
-  }
-  ped.panic = Math.max(0, ped.panic - dt);
-  ped.wanderTimer -= dt;
-  if (ped.wanderTimer <= 0 && ped.panic <= 0) {
-    ped.wanderTimer = range(Math.random, 1.5, 4);
-    ped.angle = range(Math.random, 0, Math.PI * 2);
-  }
-  const speed = ped.panic > 0 ? 150 : ped.speed;
-  const nx = ped.x + Math.cos(ped.angle) * speed * dt;
-  const ny = ped.y + Math.sin(ped.angle) * speed * dt;
-  if (!collideBuildings(city, nx, ny, 8)) {
-    ped.x = clamp(nx, 20, CONFIG.worldWidth - 20);
-    ped.y = clamp(ny, 20, city.harborY - 20);
-  } else {
-    ped.angle += Math.PI / 2;
+export function updatePedestrians(peds, dt, danger) {
+  for (const p of peds) {
+    if (p.panic > 0) p.panic -= dt;
+    // Flee the nearest danger (player shooting or a speeding car).
+    let fleeX = 0, fleeY = 0;
+    if (danger) {
+      const d = dist(p.x, p.y, danger.x, danger.y);
+      if (d < 220) { p.panic = 1.2; fleeX = (p.x - danger.x) / (d || 1); fleeY = (p.y - danger.y) / (d || 1); }
+    }
+    if (p.panic > 0) {
+      p.angle = Math.atan2(fleeY, fleeX);
+      p.x += Math.cos(p.angle) * p.speed * 2.1 * dt;
+      p.y += Math.sin(p.angle) * p.speed * 2.1 * dt;
+    } else {
+      // Stroll along the road edge; pick a new heading at random.
+      if (Math.random() < dt * 0.08) p.angle += (Math.random() - 0.5) * 2.2;
+      p.x += Math.cos(p.angle) * p.speed * dt;
+      p.y += Math.sin(p.angle) * p.speed * dt;
+    }
+    p.x = clamp(p.x, 14, WORLD.w - 14);
+    p.y = clamp(p.y, 14, WORLD.h - 14);
+    p.walkPhase += dt * 8;
   }
 }
 
-export function drawPedestrian(ctx, ped, cam, time) {
-  const sx = ped.x - cam.x;
-  const sy = ped.y - cam.y;
-  const bob = Math.sin(time * 10 + ped.x) * 1.5;
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(sx, sy + 8, 8, 4, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = ped.shirt;
-  ctx.beginPath();
-  ctx.arc(sx, sy + bob, 8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#e8b98a';
-  ctx.beginPath();
-  ctx.arc(sx, sy - 9 + bob, 5, 0, Math.PI * 2);
-  ctx.fill();
-  if (ped.panic > 0) {
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 12px system-ui, sans-serif';
-    ctx.fillText('!', sx - 3, sy - 18);
+export function drawPedestrians(ctx, peds, cam) {
+  for (const p of peds) {
+    // World coordinates: the caller translates the context by -cam.
+    const sx = p.x, sy = p.y;
+    if (sx < cam.x - 20 || sx > cam.x + cam.w + 20 || sy < cam.y - 20 || sy > cam.y + cam.h + 20) continue;
+    const bob = Math.sin(p.walkPhase) * 1.5;
+    ctx.save();
+    ctx.translate(sx, sy + bob);
+    ctx.rotate(p.angle);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.ellipse(1, 3, 9, 7, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = p.shirt;
+    ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = p.skin;
+    ctx.beginPath(); ctx.arc(3, 0, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    if (p.panic > 0) {
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('!', sx, sy - 14);
+    }
   }
 }

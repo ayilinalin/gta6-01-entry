@@ -1,156 +1,110 @@
-// Missions: a four-job story chain for Kio Rendra, handed out by fixer
-// Dara Solace. Each mission is a small state machine with a map marker,
-// an objective line and a cash payout. Finish all four to win the run.
-import { CONFIG } from './config.js';
+// Mission chain + short story: four jobs for fixer Dara Solace across Port Meridian.
+import { TUNE, CONTACT_NAME } from './config.js';
 import { dist } from './random.js';
 
-export const MISSION_DEFS = [
+export const MISSIONS = [
   {
-    id: 1,
-    title: 'First Delivery',
-    giver: 'Dara Solace',
-    briefing: 'A sealed parcel for the Coral Hotel. Drive it there, no questions. The city is watching — keep it clean.',
+    id: 1, title: 'First Delivery', reward: TUNE.missionReward[0],
+    briefing: `${CONTACT_NAME}: "New in town? Deliver this parcel to the Coral Hotel. Drive, don't walk — the client pays for speed."`,
     objective: 'Deliver the parcel to the Coral Hotel (downtown)',
-    type: 'goto',
-    reward: 400,
+    targetName: 'Coral Hotel',
   },
   {
-    id: 2,
-    title: 'The Debt Collector',
-    giver: 'Dara Solace',
-    briefing: 'Vico Marlowe skipped town owing Dara 700 tide-dollars. His red coupe is heading for the harbor. Ram it until it stops.',
-    objective: 'Chase Vico Marlowe and wreck his red coupe',
-    type: 'chase',
-    reward: 700,
+    id: 2, title: 'Tail the Courier', reward: TUNE.missionReward[1],
+    briefing: `${CONTACT_NAME}: "A courier is skimming my cut. Ram his car until he stops, then take the ledger. Don't let him reach the docks."`,
+    objective: 'Ram the courier car until it stops, then grab the ledger',
+    targetName: 'Courier',
   },
   {
-    id: 3,
-    title: 'Hot Pursuit',
-    giver: 'Dara Solace',
-    briefing: 'The PMPD is onto you after that chase. Lose them — stay out of sight until the heat dies down.',
-    objective: 'Escape the police: drop your wanted level to 0',
-    type: 'escape',
-    reward: 900,
+    id: 3, title: 'Lose the Heat', reward: TUNE.missionReward[2],
+    briefing: `${CONTACT_NAME}: "The PMPD saw the whole thing. Lose them — stay out of sight until the heat dies down."`,
+    objective: 'Lose the PMPD: survive until wanted drops to 0',
+    targetName: 'Escape',
   },
   {
-    id: 4,
-    title: 'The Tidewater Job',
-    giver: 'Dara Solace',
-    briefing: 'One last job: the Tidewater pawn shop, pier 3. Hold the counter for 20 seconds and the safe is yours. Then vanish.',
-    objective: 'Rob the Tidewater pawn shop — hold the counter 20s',
-    type: 'rob',
-    reward: 1500,
+    id: 4, title: 'Tide Mart Job', reward: TUNE.missionReward[3],
+    briefing: `${CONTACT_NAME}: "Last job. Hit the Tide Mart, grab the cash, and get back to the Hideout in one piece. Then you're family."`,
+    objective: 'Rob the Tide Mart, then reach the Hideout',
+    targetName: 'Tide Mart',
   },
 ];
 
-export function createMissionState(city) {
+export function makeMissionState(landmarks) {
+  const byName = {};
+  for (const lm of landmarks) byName[lm.name] = lm;
   return {
-    index: 0,
-    phase: 'briefing',
-    timer: 0,
-    holdTimer: 0,
-    target: missionTarget(city, 0),
-    done: 0,
-    allDone: false,
-    message: '',
-    messageTimer: 0,
+    index: 0, done: 0, stage: 'go', // go | escape | return | complete
+    target: byName['Coral Hotel'],
+    courier: null, timer: 0, message: MISSIONS[0].briefing, messageTimer: 9,
+    completedAll: false,
   };
 }
 
-export function missionTarget(city, index) {
-  const c = city.roadsX;
-  const r = city.roadsY;
-  switch (index) {
-    case 0:
-      return { x: c[4], y: r[2], label: 'Coral Hotel' };
-    case 1:
-      return { x: c[6], y: r[4], label: 'Vico Marlowe' };
-    case 2:
-      return { x: c[1], y: r[1], label: 'Safehouse' };
-    case 3:
-      return { x: 220 + 2 * 560 + 60, y: city.harborY - 60, label: 'Tidewater Pawn' };
-    default:
-      return { x: c[3], y: r[2], label: 'Port Meridian' };
-  }
+export function currentMission(ms) { return MISSIONS[Math.min(ms.index, MISSIONS.length - 1)]; }
+
+export function missionTargetPos(ms) {
+  if (ms.index === 1 && ms.courier) return { x: ms.courier.x, y: ms.courier.y };
+  if (!ms.target) return null;
+  return { x: ms.target.x + ms.target.w / 2, y: ms.target.y + ms.target.h / 2 };
 }
 
-export function currentMission(state) {
-  return MISSION_DEFS[state.index] || null;
-}
-
-export function startMission(state, city) {
-  state.phase = 'active';
-  state.timer = 0;
-  state.holdTimer = 0;
-  state.target = missionTarget(city, state.index);
-  state.message = `${currentMission(state).title}: ${currentMission(state).objective}`;
-  state.messageTimer = 5;
-}
-
-export function completeMission(state, player, city) {
-  const m = currentMission(state);
-  player.cash += m.reward;
-  player.reputation += 1;
-  state.done += 1;
-  state.message = `MISSION COMPLETE: ${m.title} — +$${m.reward}`;
-  state.messageTimer = 5;
-  if (state.index + 1 >= MISSION_DEFS.length) {
-    state.allDone = true;
-    state.phase = 'won';
-  } else {
-    state.index += 1;
-    state.phase = 'briefing';
-    state.target = missionTarget(city, state.index);
-  }
-  return m.reward;
-}
-
-// Returns 'completed' when the active mission's condition is met this tick.
-export function updateMissions(state, player, wanted, targetCar, dt) {
-  if (state.phase !== 'active') return null;
-  state.timer += dt;
-  const m = currentMission(state);
-  const t = state.target;
-  if (m.type === 'goto') {
-    if (dist(player.x, player.y, t.x, t.y) < 70) return 'completed';
-  } else if (m.type === 'chase') {
-    if (targetCar && targetCar.hp <= 0) return 'completed';
-    if (targetCar) {
-      state.target = { x: targetCar.x, y: targetCar.y, label: 'Vico Marlowe' };
+// Returns events: { type: 'complete'|'stage'|'fail', ... } for the main loop to act on.
+export function updateMissions(ms, world, dt) {
+  const events = [];
+  const m = currentMission(ms);
+  ms.messageTimer = Math.max(0, ms.messageTimer - dt);
+  const px = world.player.x, py = world.player.y;
+  const tp = missionTargetPos(ms);
+  if (ms.index === 0) {
+    if (tp && dist(px, py, tp.x, tp.y) < 70) events.push(finish(ms, m, world));
+  } else if (ms.index === 1) {
+    if (ms.courier) {
+      if (ms.courier.hp <= 0) {
+        ms.stage = 'return';
+        ms.target = world.city.landmarks.find((l) => l.name === 'Hideout');
+        ms.message = 'Ledger grabbed! Get back to the Hideout.'; ms.messageTimer = 6;
+        events.push({ type: 'stage', text: 'Ledger grabbed — return to the Hideout' });
+      }
     }
-  } else if (m.type === 'escape') {
-    if (wanted.level === 0) return 'completed';
-  } else if (m.type === 'rob') {
-    if (dist(player.x, player.y, t.x, t.y) < 80) {
-      state.holdTimer += dt;
-      if (state.holdTimer >= 20) return 'completed';
-    } else {
-      state.holdTimer = Math.max(0, state.holdTimer - dt * 2);
+    if (ms.stage === 'return' && tp && dist(px, py, tp.x, tp.y) < 70) events.push(finish(ms, m, world));
+  } else if (ms.index === 2) {
+    if (world.police.wanted === 0) events.push(finish(ms, m, world));
+  } else if (ms.index === 3) {
+    if (ms.stage === 'go' && tp && dist(px, py, tp.x, tp.y) < 70) {
+      ms.stage = 'return';
+      ms.target = world.city.landmarks.find((l) => l.name === 'Hideout');
+      world.money += 150; // cash from the till, on top of the job reward
+      ms.message = 'Cash grabbed! Now reach the Hideout.'; ms.messageTimer = 6;
+      events.push({ type: 'stage', text: 'Tide Mart robbed — reach the Hideout' });
+    } else if (ms.stage === 'return' && tp && dist(px, py, tp.x, tp.y) < 70) {
+      events.push(finish(ms, m, world));
     }
   }
-  return null;
+  return events;
 }
 
-export function drawMissionMarker(ctx, state, cam, time) {
-  if (state.phase !== 'active') return;
-  const t = state.target;
-  const sx = t.x - cam.x;
-  const sy = t.y - cam.y;
-  if (sx < -40 || sx > 1320 || sy < -40 || sy > 760) return;
-  const pulse = 1 + Math.sin(time * 5) * 0.15;
-  ctx.strokeStyle = '#ffd94d';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.arc(sx, sy, 26 * pulse, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = '#ffd94d';
-  ctx.beginPath();
-  ctx.moveTo(sx, sy - 34);
-  ctx.lineTo(sx - 8, sy - 18);
-  ctx.lineTo(sx + 8, sy - 18);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = '#ffd94d';
-  ctx.font = 'bold 13px system-ui, sans-serif';
-  ctx.fillText(t.label, sx + 14, sy - 22);
+function finish(ms, m, world) {
+  world.money += m.reward;
+  world.rep += 1;
+  ms.done += 1;
+  ms.index += 1;
+  if (ms.index >= MISSIONS.length) {
+    ms.completedAll = true;
+    ms.message = `${CONTACT_NAME}: "All four jobs done. Port Meridian is yours, kid."`;
+    ms.messageTimer = 10;
+    return { type: 'complete', mission: m, allDone: true };
+  }
+  const next = MISSIONS[ms.index];
+  ms.stage = 'go';
+  const name = next.id === 2 ? 'Courier' : next.targetName;
+  ms.target = name === 'Courier' ? null : world.city.landmarks.find((l) => l.name === name);
+  ms.message = next.briefing;
+  ms.messageTimer = 9;
+  return { type: 'complete', mission: m, allDone: false };
+}
+
+export function startCourier(ms, world) {
+  const c = { x: world.player.x + 420, y: world.player.y - 120, angle: 0, speed: 130, hp: 100, color: '#ff7a2e', kind: 'courier' };
+  ms.courier = c;
+  return c;
 }

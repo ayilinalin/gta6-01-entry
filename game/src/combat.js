@@ -1,61 +1,52 @@
-// Combat: bullets, muzzle flashes and hit feedback. The player shoots
-// with the mouse (pistol, on foot) or punches up close; police and the
-// mission target can be damaged. Every shot raises the heat.
-import { CONFIG } from './config.js';
+// Combat: mouse-aimed shooting, bullets, muzzle flash, hit feedback.
+import { TUNE } from './config.js';
 import { dist } from './random.js';
 
-export function createCombat() {
-  return { bullets: [], flashes: [], tracers: [] };
+export function makeCombat() {
+  return { bullets: [], cooldown: 0, flash: 0, hits: 0 };
 }
 
-export function fireBullet(combat, x, y, angle, owner) {
+export function tryShoot(combat, from, angle) {
+  if (combat.cooldown > 0) return false;
+  combat.cooldown = TUNE.fireCooldown;
+  combat.flash = 0.06;
   combat.bullets.push({
-    x, y,
-    vx: Math.cos(angle) * CONFIG.bulletSpeed,
-    vy: Math.sin(angle) * CONFIG.bulletSpeed,
+    x: from.x + Math.cos(angle) * 22, y: from.y + Math.sin(angle) * 22,
+    vx: Math.cos(angle) * TUNE.bulletSpeed, vy: Math.sin(angle) * TUNE.bulletSpeed,
     life: 0.9,
-    owner,
   });
-  combat.flashes.push({ x: x + Math.cos(angle) * 26, y: y + Math.sin(angle) * 26, life: 0.08 });
+  return true;
 }
 
-export function updateBullets(combat, targets, dt, onHit) {
+// Returns { hitPed, hitCop, hitCourier } counts for the main loop to price.
+export function updateCombat(combat, dt, world) {
+  const hits = { hitPed: 0, hitCop: 0, hitCourier: 0, hitCar: 0 };
+  combat.cooldown = Math.max(0, combat.cooldown - dt);
+  combat.flash = Math.max(0, combat.flash - dt);
   for (const b of combat.bullets) {
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
-    b.life -= dt;
-    for (const t of targets) {
-      if (t.dead || t.hp <= 0) continue;
-      if (dist(b.x, b.y, t.x, t.y) < (t.radius || 22)) {
-        t.hp -= CONFIG.bulletDamage;
-        b.life = 0;
-        combat.tracers.push({ x: b.x, y: b.y, life: 0.25, text: `-${CONFIG.bulletDamage}` });
-        if (onHit) onHit(t);
-        break;
-      }
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    for (const p of world.peds) {
+      if (dist(b.x, b.y, p.x, p.y) < 12) { b.life = 0; p.panic = 2; hits.hitPed++; }
+    }
+    for (const c of world.police.cops) {
+      if (dist(b.x, b.y, c.x, c.y) < 26) { b.life = 0; hits.hitCop++; }
+    }
+    if (world.missions.courier && dist(b.x, b.y, world.missions.courier.x, world.missions.courier.y) < 26) {
+      b.life = 0; world.missions.courier.hp -= TUNE.bulletDamage; hits.hitCourier++;
+    }
+    for (const car of world.cars) {
+      if (car.kind === 'traffic' && dist(b.x, b.y, car.x, car.y) < 26) { b.life = 0; hits.hitCar++; }
     }
   }
-  combat.bullets = combat.bullets.filter((b) => b.life > 0 && b.x > 0 && b.x < CONFIG.worldWidth && b.y > 0 && b.y < CONFIG.worldHeight);
-  combat.flashes = combat.flashes.filter((f) => (f.life -= dt) > 0);
-  combat.tracers = combat.tracers.filter((t) => (t.life -= dt) > 0);
+  combat.bullets = combat.bullets.filter((b) => b.life > 0);
+  combat.hits += hits.hitPed + hits.hitCop + hits.hitCourier;
+  return hits;
 }
 
 export function drawBullets(ctx, combat, cam) {
+  ctx.fillStyle = '#ffe9a8';
   for (const b of combat.bullets) {
-    ctx.fillStyle = '#ffe66d';
-    ctx.beginPath();
-    ctx.arc(b.x - cam.x, b.y - cam.y, 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  for (const f of combat.flashes) {
-    ctx.fillStyle = 'rgba(255, 220, 100, 0.9)';
-    ctx.beginPath();
-    ctx.arc(f.x - cam.x, f.y - cam.y, 9, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.font = 'bold 13px system-ui, sans-serif';
-  for (const t of combat.tracers) {
-    ctx.fillStyle = '#ff6b6b';
-    ctx.fillText(t.text, t.x - cam.x, t.y - cam.y);
+    // World coordinates: the caller translates the context by -cam.
+    ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, Math.PI * 2); ctx.fill();
   }
 }

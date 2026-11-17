@@ -1,29 +1,38 @@
-// NEON TIDE entrypoint: copies game/ and screenshots/ from this repository
-// into the output directory and writes /output/dossier.json with
-// buildDossier from vendor/makefun-game.ts. Node 22, standard library only.
-// Run twice and the two outputs are byte-identical: no timestamps, no
-// random data anywhere in what is written.
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// NEON TIDE entry builder (Node 22, stdlib only).
+// Copies game/ and screenshots/ into the output directory and writes
+// dossier.json with buildDossier from vendor/makefun-game.ts.
+// Run twice: both runs must produce byte-identical output.
+//   MAKEFUN_OUTPUT_DIR=out node main.ts
 import { buildDossier } from './vendor/makefun-game.ts';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const repoRoot = dirname(fileURLToPath(import.meta.url));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || '/output';
+const outDir = resolve(process.env.MAKEFUN_OUTPUT_DIR || '/output');
 
-mkdirSync(outDir, { recursive: true });
-cpSync(join(repoRoot, 'game'), join(outDir, 'game'), { recursive: true });
-cpSync(join(repoRoot, 'screenshots'), join(outDir, 'screenshots'), { recursive: true });
-
-// Fail loudly instead of writing a dossier for a half-copied game.
-if (!existsSync(join(outDir, 'game', 'index.html'))) {
-  throw new Error('main.ts: game/index.html did not copy to the output directory');
-}
-
-const dossier = buildDossier(outDir, {
-  text_max_bytes: 163840,
+// Caps from the bounty gates: dossier at most 1.5 MiB, at most 4 screenshots
+// of 256 KiB each, game/ at most 993 entries / 48 MiB, paths at most 1000 bytes.
+const CAPS = {
+  text_max_bytes: 1572864,
   screenshots: { max: 4, max_bytes: 262144 },
   game_max_files: 993,
   game_max_bytes: 50331648,
-});
+  game_path_max_bytes: 1000,
+};
+
+function copyTree(name) {
+  const src = join(repoRoot, name);
+  if (!existsSync(src)) throw new Error(`main.ts: missing ${name}/ in ${repoRoot}`);
+  cpSync(src, join(outDir, name), { recursive: true });
+}
+
+// Fresh output directory every run, so stale files can never leak into a dossier.
+rmSync(outDir, { recursive: true, force: true });
+mkdirSync(outDir, { recursive: true });
+copyTree('game');
+copyTree('screenshots');
+
+const dossier = buildDossier(outDir, CAPS);
 writeFileSync(join(outDir, 'dossier.json'), dossier);
+console.log(`wrote ${outDir}/dossier.json (${dossier.length} bytes)`);

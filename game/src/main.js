@@ -1,368 +1,285 @@
-// NEON TIDE — main loop. Fixed-step simulation, camera follow, input,
-// and the glue between every system: city, player, vehicles, pedestrians,
-// police, missions, combat, HUD, audio, save and screenshot scenarios.
-import { CONFIG, PALETTE } from './config.js';
-import { makeRng, clamp, dist, range } from './random.js';
-import { createCity, drawCity, collideBuildings, inHarbor, isOnRoad } from './city.js';
-import { createPlayer, updatePlayerOnFoot, nearestStealableCar, drawPlayer } from './player.js';
-import { spawnTraffic, updateTrafficCar, updateDrivenCar, collideCarWithCity, drawCar, makeCar } from './vehicles.js';
-import { spawnPedestrians, updatePedestrian, drawPedestrian } from './pedestrians.js';
-import { createWanted, addHeat, updateWanted, wantedTargetCops, spawnPoliceCar, updatePoliceCar, makeRoadblock, updateRoadblock } from './police.js';
-import { createMissionState, startMission, completeMission, updateMissions, drawMissionMarker, currentMission } from './missions.js';
-import { createCombat, fireBullet, updateBullets, drawBullets } from './combat.js';
-import { drawHud, drawStartScreen, drawEndScreen } from './hud.js';
-import { createAudio, ensureAudio, setEngine, setSiren, playGunshot, playPickup, playMissionComplete, playBusted } from './audio.js';
-import { loadSave, saveGame } from './save.js';
-import { applyShot } from './shots.js';
+// NEON TIDE — main loop: input, camera, simulation, rendering, start/end flow.
+import { GAME_NAME, VIEW, WORLD, TUNE } from './config.js';
+import { makeRng, clamp, dist } from './random.js';
+import { makeCity, drawCity, collideBuildings, districtAt } from './city.js';
+import { makePlayer, updatePlayer, drawPlayer } from './player.js';
+import { spawnTraffic, spawnParked, updateTraffic, updateDriven, nearestCar, drawCar } from './vehicles.js';
+import { spawnPedestrians, updatePedestrians, drawPedestrians } from './pedestrians.js';
+import { makePolice, addHeat, updatePolice, drawPolice } from './police.js';
+import { makeMissionState, updateMissions, currentMission, missionTargetPos, startCourier } from './missions.js';
+import { makeCombat, tryShoot, updateCombat, drawBullets } from './combat.js';
+import { drawHud, drawStart, drawEnd } from './hud.js';
+import { makeAudio, ensureAudio, setEngine, setSiren, sfxShoot, sfxHit, sfxPickup, sfxMission, sfxBusted, sfxSteal } from './audio.js';
+import { loadSave, writeSave, clearSave } from './save.js';
+import { shotFromUrl, applyShot } from './shots.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const params = new URLSearchParams(window.location.search);
-const shotParam = parseInt(params.get('shot') || '0', 10);
-const SHOT = shotParam >= 1 && shotParam <= 4 ? shotParam : 0;
+canvas.width = VIEW.w; canvas.height = VIEW.h;
 
-const rng = makeRng(SHOT ? 1000 + SHOT : 20261117);
-const city = createCity(20261117);
-const game = {
-  rng,
-  city,
-  player: createPlayer(800, 560),
-  traffic: spawnTraffic(city, rng, CONFIG.trafficCount),
-  peds: spawnPedestrians(city, rng, CONFIG.pedestrianCount),
-  policeCars: [],
-  roadblocks: [],
-  wanted: createWanted(),
-  missions: createMissionState(city),
-  combat: createCombat(),
-  audio: createAudio(),
-  cam: { x: 0, y: 0 },
-  screen: 'start',
-  time: 0,
-  clockMinutes: 12 * 60 + 5,
-  clockText: '12:05',
-  targetCar: null,
-  endScreen: null,
-  hasSave: !!loadSave(),
-  startButtons: null,
-};
+const input = { keys: {}, mouseSX: VIEW.w / 2, mouseSY: VIEW.h / 2, mouseX: 0, mouseY: 0, clicked: false };
+addEventListener('keydown', (e) => {
+  input.keys[e.key.toLowerCase()] = true;
+  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(e.key.toLowerCase())) e.preventDefault();
+  onKey(e.key.toLowerCase());
+});
+addEventListener('keyup', (e) => { input.keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  input.mouseSX = (e.clientX - r.left) * (VIEW.w / r.width);
+  input.mouseSY = (e.clientY - r.top) * (VIEW.h / r.height);
+});
+canvas.addEventListener('mousedown', (e) => {
+  ensureAudio(world.audio);
+  const r = canvas.getBoundingClientRect();
+  input.mouseSX = (e.clientX - r.left) * (VIEW.w / r.width);
+  input.mouseSY = (e.clientY - r.top) * (VIEW.h / r.height);
+  input.clicked = true;
+  onClick(input.mouseSX, input.mouseSY);
+});
 
-const input = {
-  keys: new Set(),
-  mouseX: CONFIG.canvasWidth / 2,
-  mouseY: CONFIG.canvasHeight / 2,
-  mouseDown: false,
-  clicked: false,
-};
-
-// Debug handle for automated play-testing (read-only inspection).
-window.__NEON_TIDE__ = game;
-
-function worldMouse() {
-  return { x: game.cam.x + input.mouseX, y: game.cam.y + input.mouseY };
+function buildWorld(seed = 1337) {
+  const rng = makeRng(seed);
+  const city = makeCity(seed);
+  const player = makePlayer(700, 420);
+  const cars = [...spawnParked(city, 10, rng), ...spawnTraffic(city, 14, rng)];
+  const world = {
+    mode: 'start', endKind: null, seed,
+    city, player, cars,
+    peds: spawnPedestrians(26, rng),
+    police: makePolice(),
+    missions: makeMissionState(city.landmarks),
+    combat: makeCombat(),
+    audio: makeAudio(),
+    money: 0, rep: 0, clock: 8 * 60 + 15, elapsed: 0,
+    cam: { x: 0, y: 0, w: VIEW.w, h: VIEW.h },
+    saveTimer: 0, frames: 0,
+    missionTargetPos() { return missionTargetPos(this.missions); },
+  };
+  return world;
 }
 
-function startGame(useSave) {
-  ensureAudio(game.audio);
-  if (useSave) {
-    const s = loadSave();
-    if (s) {
-      game.player.cash = s.cash || 0;
-      game.player.reputation = s.reputation || 0;
-      game.missions.done = s.missionsDone || 0;
-      game.missions.index = Math.min(s.missionIndex || 0, 3);
-      game.player.x = s.x || 800;
-      game.player.y = s.y || 560;
+let world = buildWorld();
+const savedGame = loadSave();
+
+const api = {
+  enterCar(car) {
+    car.kind = 'player'; car.driver = false;
+    world.player.inCar = car;
+    world.player.x = car.x; world.player.y = car.y;
+  },
+  addHeat(n) { addHeat(world.police, n); },
+  startCourier() {
+    const c = startCourier(world.missions, world);
+    world.courierCar = c;
+  },
+};
+
+function startGame(fromSave) {
+  ensureAudio(world.audio);
+  if (fromSave && savedGame) {
+    world.money = savedGame.money; world.rep = savedGame.rep || 0;
+    world.missions.done = savedGame.missionsDone || 0;
+    world.missions.index = Math.min(savedGame.missionIndex || 0, 3);
+    world.player.x = savedGame.x || 700; world.player.y = savedGame.y || 420;
+    world.missions.message = 'Welcome back to Port Meridian.'; world.missions.messageTimer = 5;
+  }
+  world.mode = 'play';
+}
+
+function endGame(kind) {
+  world.mode = 'end'; world.endKind = kind;
+  setSiren(world.audio, false); setEngine(world.audio, 0, false);
+  if (kind === 'busted') sfxBusted(world.audio); else sfxMission(world.audio);
+  clearSave();
+}
+
+function onKey(k) {
+  if (world.mode === 'start') {
+    if (k === 'enter') startGame(false);
+    if (k === 'c' && savedGame) startGame(true);
+    return;
+  }
+  if (world.mode === 'end') {
+    if (k === 'r') { world = buildWorld(); world.mode = 'play'; }
+    return;
+  }
+  if (k === 'e' && !world.player.inCar) {
+    const car = nearestCar(world.cars, world.player.x, world.player.y, 70);
+    if (car && car.kind !== 'cop') {
+      api.enterCar(car);
+      addHeat(world.police, 1);
+      sfxSteal(world.audio);
+      world.missions.message = car.kind === 'parked' ? 'Car stolen — the PMPD noticed.' : 'Car jacked — the PMPD noticed.';
+      world.missions.messageTimer = 4;
     }
   }
-  game.screen = 'play';
-  if (game.missions.phase === 'briefing') startMission(game.missions, city);
-}
-
-function endRun(kind) {
-  game.screen = kind;
-  if (kind === 'busted') {
-    playBusted(game.audio);
-    game.endScreen = {
-      title: 'BUSTED',
-      lines: ['The PMPD caught up with Kio Rendra at wanted level 5.', 'The harbor keeps its secrets — for now.'],
-    };
-  } else if (kind === 'won') {
-    playMissionComplete(game.audio);
-    game.endScreen = {
-      title: 'PORT MERIDIAN IS YOURS',
-      lines: ['All 4 missions complete. Dara Solace pays the final cut.', 'Kio Rendra owns Port Meridian tonight.'],
-    };
+  if (k === 'f' && world.player.inCar) {
+    const car = world.player.inCar;
+    car.kind = 'parked';
+    world.player.inCar = null;
+    world.player.x = car.x + 40; world.player.y = car.y;
   }
+  if (k === 'm') world.audio.muted = !world.audio.muted;
 }
 
-function stealCar() {
-  const car = nearestStealableCar(game.player, game.traffic);
-  if (!car) return;
-  game.player.inCar = car;
-  game.traffic = game.traffic.filter((c) => c !== car);
-  addHeat(game.wanted, 25);
-  game.missions.message = 'Car stolen — the PMPD noticed. Wanted level up!';
-  game.missions.messageTimer = 4;
-}
-
-function exitCar() {
-  const car = game.player.inCar;
-  if (!car) return;
-  game.player.x = car.x + 40;
-  game.player.y = car.y + 40;
-  game.player.inCar = null;
-  car.speed = 0;
-  game.traffic.push(car);
-}
-
-function spawnTargetCar() {
-  const t = game.missions.target;
-  const car = makeCar(t.x, t.y, -Math.PI / 2, { rng, color: '#d94f3d', name: 'Vico Marlowe' });
-  car.hp = 120;
-  game.targetCar = car;
-  return car;
+function onClick(sx, sy) {
+  if (world.mode === 'start') {
+    if (sx >= 84 && sx <= 384 && sy >= 420 && sy <= 484) startGame(false);
+    return;
+  }
+  if (world.mode === 'end') {
+    if (sx >= VIEW.w / 2 - 150 && sx <= VIEW.w / 2 + 150 && sy >= 440 && sy <= 496) { world = buildWorld(); world.mode = 'play'; }
+    return;
+  }
+  if (world.mode === 'play' && !world.player.inCar) {
+    const p = world.player;
+    if (tryShoot(world.combat, p, p.angle)) sfxShoot(world.audio);
+  }
 }
 
 function update(dt) {
-  game.time += dt;
-  game.clockMinutes = (game.clockMinutes + dt * 0.6) % (24 * 60);
-  const hh = Math.floor(game.clockMinutes / 60);
-  const mm = Math.floor(game.clockMinutes % 60);
-  game.clockText = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-  if (game.screen !== 'play') return;
-  const wm = worldMouse();
-  game.player.aimX = wm.x;
-  game.player.aimY = wm.y;
-  game.missions.messageTimer = Math.max(0, game.missions.messageTimer - dt);
+  world.elapsed += dt;
+  world.clock = (world.clock + dt * 0.6) % (24 * 60);
+  const p = world.player;
+  // Mouse position in world space for aiming.
+  input.mouseX = input.mouseSX + world.cam.x;
+  input.mouseY = input.mouseSY + world.cam.y;
 
-  // Player: on foot or driving.
-  if (game.player.inCar) {
-    const car = game.player.inCar;
-    const { nx, ny } = updateDrivenCar(car, input, dt);
-    if (collideCarWithCity(car, city, nx, ny)) {
-      car.speed *= -0.3;
-      addHeat(game.wanted, 1);
-    } else {
-      car.x = nx;
-      car.y = ny;
-    }
-    game.player.x = car.x;
-    game.player.y = car.y;
-    game.player.angle = car.angle;
-    // Hitting pedestrians while driving raises heat.
-    for (const ped of game.peds) {
-      if (Math.abs(car.speed) > 60 && dist(car.x, car.y, ped.x, ped.y) < 30) {
-        ped.panic = 3;
-        ped.x += Math.cos(car.angle) * 40;
-        ped.y += Math.sin(car.angle) * 40;
-        addHeat(game.wanted, 8);
+  if (world.mode !== 'play') return;
+
+  if (p.inCar) {
+    const car = p.inCar;
+    updateDriven(car, input, dt);
+    // Scripted shots keep the car rolling so the capture reads as driving.
+    if (shot > 0 && shot < 4) car.speed = shot === 3 ? 260 : 150;
+    const fixed = collideBuildings(world.city, car.x, car.y, 24);
+    if (fixed.x !== car.x || fixed.y !== car.y) { car.x = fixed.x; car.y = fixed.y; car.speed *= 0.3; }
+    p.x = car.x; p.y = car.y; p.angle = car.angle;
+    // Running over pedestrians is a crime the PMPD notices (not in staged shots).
+    for (const ped of world.peds) {
+      if (dist(ped.x, ped.y, car.x, car.y) < 26 && Math.abs(car.speed) > 120) {
+        ped.panic = 2; ped.x += (ped.x - car.x) * 0.4; ped.y += (ped.y - car.y) * 0.4;
+        if (shot === 0) addHeat(world.police, 0.4);
       }
     }
-    setEngine(game.audio, Math.abs(car.speed) / CONFIG.carMaxSpeed, true);
+    setEngine(world.audio, Math.abs(car.speed) / TUNE.carMax, true);
   } else {
-    updatePlayerOnFoot(game.player, input, city, dt);
-    setEngine(game.audio, 0, false);
-    if (input.clicked) {
-      const wm2 = worldMouse();
-      const ang = Math.atan2(wm2.y - game.player.y, wm2.x - game.player.x);
-      if (game.player.shootCooldown <= 0) {
-        game.player.shootCooldown = 0.28;
-        fireBullet(game.combat, game.player.x, game.player.y, ang, 'player');
-        playGunshot(game.audio);
-        addHeat(game.wanted, 6);
-      }
+    updatePlayer(p, input, dt, world.city);
+    setEngine(world.audio, 0, false);
+  }
+
+  updateTraffic(world.cars, dt, makeRng((world.elapsed * 1000) | 0));
+  updatePedestrians(world.peds, dt, input.clicked ? { x: p.x, y: p.y } : null);
+  input.clicked = false;
+  updatePolice(world.police, dt, p, makeRng(((world.elapsed * 997) | 0) + 7));
+
+  // Courier flees from the player while mission 2 is active.
+  const ms = world.missions;
+  if (ms.index === 1 && ms.courier && ms.stage === 'go') {
+    const c = ms.courier;
+    const away = Math.atan2(c.y - p.y, c.x - p.x);
+    c.angle += clamp(((away - c.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI, -2 * dt, 2 * dt);
+    c.speed = 150;
+    c.x += Math.cos(c.angle) * c.speed * dt;
+    c.y += Math.sin(c.angle) * c.speed * dt;
+    c.x = clamp(c.x, 30, WORLD.w - 30); c.y = clamp(c.y, 30, WORLD.h - 30);
+    if (p.inCar && dist(p.x, p.y, c.x, c.y) < 46) { c.hp -= 45 * dt; if (c.hp <= 0) sfxHit(world.audio); }
+  }
+
+  const hits = updateCombat(world.combat, dt, world);
+  if (shot === 0) {
+    if (hits.hitPed > 0) addHeat(world.police, 0.5);
+    if (hits.hitCop > 0) { addHeat(world.police, 1); sfxHit(world.audio); }
+  }
+  if (hits.hitCourier > 0) sfxHit(world.audio);
+
+  // Cop contact: rammed on foot hurts, in a car it slows you down.
+  for (const cop of world.police.cops) {
+    const d = dist(cop.x, cop.y, p.x, p.y);
+    if (d < 34) {
+      if (p.inCar) { p.inCar.speed *= 0.92; p.hp -= 3 * dt; }
+      else p.hp -= 14 * dt;
+      if (world.police.wanted >= 5 && d < 26 && !p.inCar) { endGame('busted'); return; }
+    }
+  }
+  if (p.hp <= 0) { endGame('busted'); return; }
+
+  // Mission events.
+  const events = updateMissions(ms, world, dt);
+  for (const ev of events) {
+    if (ev.type === 'complete') {
+      sfxMission(world.audio);
+      sfxPickup(world.audio);
+      if (ev.allDone) { endGame('complete'); return; }
+      if (ms.index === 2) addHeat(world.police, 2.5); // mission 3 starts hot
+      if (ms.index === 1) api.startCourier();
     }
   }
 
-  // Traffic + pedestrians.
-  for (const car of game.traffic) updateTrafficCar(car, city, [...game.traffic, ...game.policeCars], dt);
-  if (game.targetCar) updateTrafficCar(game.targetCar, city, [...game.traffic, ...game.policeCars], dt);
-  const threat = game.player.inCar ? game.player.inCar : game.player;
-  for (const ped of game.peds) updatePedestrian(ped, city, threat, dt);
-
-  // Combat resolution.
-  const targets = [];
-  for (const pc of game.policeCars) targets.push({ x: pc.x, y: pc.y, hp: pc.hp, radius: 24, car: pc, kind: 'police' });
-  if (game.targetCar) targets.push({ x: game.targetCar.x, y: game.targetCar.y, hp: game.targetCar.hp, radius: 24, car: game.targetCar, kind: 'target' });
-  updateBullets(game.combat, targets, dt, (t) => {
-    if (t.kind === 'police') {
-      t.car.hp = t.hp;
-      addHeat(game.wanted, 10);
-      if (t.car.hp <= 0) {
-        game.policeCars = game.policeCars.filter((c) => c !== t.car);
-        game.player.cash += 50;
-        game.missions.message = 'Cop car disabled — +$50';
-        game.missions.messageTimer = 3;
-      }
-    } else if (t.kind === 'target') {
-      game.targetCar.hp = t.hp;
-    }
-  });
-
-  // Wanted + police.
-  updateWanted(game.wanted, dt);
-  const want = wantedTargetCops(game.wanted.level);
-  while (game.policeCars.length < want) game.policeCars.push(spawnPoliceCar(game.player, rng));
-  while (game.policeCars.length > want && game.policeCars.length > 0) game.policeCars.pop();
-  for (const pc of game.policeCars) {
-    const d = updatePoliceCar(pc, game.player, dt);
-    if (d < 46) {
-      // Caught: HP drains, busted at wanted 5 with no HP.
-      game.player.hp -= 26 * dt;
-      addHeat(game.wanted, 2);
-      if (game.player.hp <= 0) endRun('busted');
-    }
-  }
-  // Roadblocks at wanted 4+.
-  if (game.wanted.level >= 4 && game.roadblocks.length === 0) {
-    game.roadblocks.push(makeRoadblock(game.player, rng));
-  }
-  game.roadblocks = game.roadblocks.filter((b) => updateRoadblock(b, dt));
-  for (const b of game.roadblocks) {
-    for (const rc of b.cars) {
-      if (dist(game.player.x, game.player.y, rc.x, rc.y) < 40 && game.player.inCar) {
-        game.player.inCar.speed *= 0.2;
-        addHeat(game.wanted, 4);
-      }
-    }
-  }
-  setSiren(game.audio, game.wanted.level, game.time);
-
-  // Missions.
-  if (game.missions.phase === 'briefing' && game.missions.index === 1 && !game.targetCar) spawnTargetCar();
-  const result = updateMissions(game.missions, game.player, game.wanted, game.targetCar, dt);
-  if (result === 'completed') {
-    playMissionComplete(game.audio);
-    completeMission(game.missions, game.player, city);
-    saveGame(game.player, game.missions);
-    if (game.missions.allDone) endRun('won');
-    else if (game.missions.index === 1) spawnTargetCar();
-  }
-  if (game.targetCar && game.targetCar.hp <= 0 && game.missions.index === 1 && game.missions.phase === 'active') {
-    game.targetCar = null;
-  }
+  setSiren(world.audio, world.police.wanted >= 2);
+  world.saveTimer += dt;
+  if (world.saveTimer > 5) { world.saveTimer = 0; writeSave(world); }
 
   // Camera follows the player, clamped to the world.
-  game.cam.x = clamp(game.player.x - CONFIG.canvasWidth / 2, 0, CONFIG.worldWidth - CONFIG.canvasWidth);
-  game.cam.y = clamp(game.player.y - CONFIG.canvasHeight / 2, 0, CONFIG.worldHeight - CONFIG.canvasHeight);
+  world.cam.x = clamp(p.x - VIEW.w / 2, 0, WORLD.w - VIEW.w);
+  world.cam.y = clamp(p.y - VIEW.h / 2, 0, WORLD.h - VIEW.h);
 }
 
-function render() {
-  const cam = { x: game.cam.x, y: game.cam.y };
-  if (game.screen === 'start') {
-    game.startButtons = drawStartScreen(ctx, game.hasSave);
+function draw() {
+  const cam = world.cam;
+  if (world.mode === 'start') { drawStart(ctx, world, savedGame); return; }
+  if (world.mode === 'end') {
+    // Keep the city visible behind the end panel.
+    ctx.save(); ctx.translate(-cam.x, -cam.y);
+    drawCity(ctx, world.city, cam);
+    ctx.restore();
+    drawEnd(ctx, world);
     return;
   }
-  drawCity(ctx, city, cam);
-  // Mission marker under everything moving.
-  drawMissionMarker(ctx, game.missions, cam, game.time);
-  for (const ped of game.peds) drawPedestrian(ctx, ped, cam, game.time);
-  for (const car of game.traffic) drawCar(ctx, car, cam);
-  if (game.targetCar) {
-    drawCar(ctx, game.targetCar, cam);
-    ctx.fillStyle = '#ff4d4d';
-    ctx.font = 'bold 12px system-ui, sans-serif';
-    ctx.fillText('VICO', game.targetCar.x - cam.x - 16, game.targetCar.y - cam.y - 26);
+  // World pass in world coordinates (context translated by -cam), HUD in screen coordinates.
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+  drawCity(ctx, world.city, cam);
+  for (const car of world.cars) drawCar(ctx, car, cam);
+  if (world.missions.courier && world.missions.index === 1) {
+    const c = world.missions.courier;
+    drawCar(ctx, { ...c, color: '#ff7a2e', kind: 'courier' }, cam);
+    ctx.fillStyle = '#ff7a2e'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('COURIER', c.x, c.y - 28);
   }
-  for (const b of game.roadblocks) for (const rc of b.cars) drawCar(ctx, rc, cam);
-  for (const pc of game.policeCars) drawCar(ctx, pc, cam);
-  if (game.player.inCar) drawCar(ctx, game.player.inCar, cam);
-  else drawPlayer(ctx, game.player, cam, game.time);
-  drawBullets(ctx, game.combat, cam);
-  // "E — STEAL" prompt when a car is near on foot.
-  if (!game.player.inCar && game.screen === 'play') {
-    const car = nearestStealableCar(game.player, game.traffic);
-    if (car) {
-      ctx.fillStyle = 'rgba(8,12,24,0.8)';
-      ctx.font = 'bold 15px system-ui, sans-serif';
-      ctx.fillText('Press E to steal the ' + car.name, game.player.x - cam.x - 90, game.player.y - cam.y - 34);
-    }
+  drawPedestrians(ctx, world.peds, cam);
+  drawPolice(ctx, world.police, cam);
+  if (!world.player.inCar) drawPlayer(ctx, world.player, cam);
+  drawBullets(ctx, world.combat, cam);
+  // Muzzle flash.
+  if (world.combat.flash > 0 && !world.player.inCar) {
+    const p = world.player;
+    ctx.fillStyle = 'rgba(255,233,168,0.9)';
+    ctx.beginPath();
+    ctx.arc(p.x + Math.cos(p.angle) * 26, p.y + Math.sin(p.angle) * 26, 7, 0, Math.PI * 2);
+    ctx.fill();
   }
-  drawHud(ctx, game);
-  if ((game.screen === 'busted' || game.screen === 'won') && game.endScreen) {
-    drawEndScreen(ctx, game.endScreen.title, game.endScreen.lines, game.player.cash, game.endScreen.hint);
-  }
+  ctx.restore();
+  drawHud(ctx, world);
 }
 
-// Input.
-window.addEventListener('keydown', (e) => {
-  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-  if (e.repeat) return;
-  input.keys.add(e.code);
-  ensureAudio(game.audio);
-  if (e.code === 'Enter') {
-    if (game.screen === 'start') startGame(false);
-    else if (game.screen === 'busted' || game.screen === 'won') location.reload();
-    else if (game.missions.phase === 'briefing') startMission(game.missions, city);
-  }
-  if (e.code === 'KeyE' && game.screen === 'play' && !game.player.inCar) stealCar();
-  if (e.code === 'KeyF' && game.screen === 'play' && game.player.inCar) exitCar();
-  if (e.code === 'KeyM') game.audio.muted = !game.audio.muted;
-});
-window.addEventListener('keyup', (e) => input.keys.delete(e.code));
-canvas.addEventListener('mousemove', (e) => {
-  const r = canvas.getBoundingClientRect();
-  input.mouseX = ((e.clientX - r.left) / r.width) * CONFIG.canvasWidth;
-  input.mouseY = ((e.clientY - r.top) / r.height) * CONFIG.canvasHeight;
-});
-canvas.addEventListener('mousedown', (e) => {
-  ensureAudio(game.audio);
-  const r = canvas.getBoundingClientRect();
-  const mx = ((e.clientX - r.left) / r.width) * CONFIG.canvasWidth;
-  const my = ((e.clientY - r.top) / r.height) * CONFIG.canvasHeight;
-  if (game.screen === 'start' && game.startButtons) {
-    const b = game.startButtons;
-    if (mx >= b.start.x && mx <= b.start.x + b.start.w && my >= b.start.y && my <= b.start.y + b.start.h) startGame(false);
-    else if (game.hasSave && mx >= b.cont.x && mx <= b.cont.x + b.cont.w && my >= b.cont.y && my <= b.cont.y + b.cont.h) startGame(true);
-    return;
-  }
-  if (game.screen === 'play' && !game.player.inCar) input.clicked = true;
-});
-window.addEventListener('mouseup', () => { input.clicked = false; });
+// Scripted shots stage the world before the first frame.
+const shot = shotFromUrl();
+if (shot > 0) applyShot(shot, world, api);
+// Center the camera on the staged player for shots.
+world.cam.x = clamp(world.player.x - VIEW.w / 2, 0, WORLD.w - VIEW.w);
+world.cam.y = clamp(world.player.y - VIEW.h / 2, 0, WORLD.h - VIEW.h);
 
-// Fixed-step loop.
 let last = performance.now();
-let acc = 0;
-const STEP = 1 / 60;
 function frame(now) {
-  // Screenshot mode freezes after the settle ticks: the shot stays exactly
-  // as staged (speed, wanted level, HP) instead of decaying before capture.
-  if (SHOT && game.frozen) {
-    render();
-    requestAnimationFrame(frame);
-    return;
-  }
-  const dt = Math.min(0.1, (now - last) / 1000);
+  const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  acc += dt;
-  while (acc >= STEP) {
-    update(STEP);
-    acc -= STEP;
-  }
-  render();
+  update(dt);
+  draw();
+  world.frames++;
+  if (world.frames === 3) window.__shotReady = true;
   requestAnimationFrame(frame);
 }
-
-if (SHOT) {
-  applyShot(game, SHOT);
-  // Let the world settle a few ticks so traffic/peds are in place, then freeze the shot.
-  for (let i = 0; i < 90; i++) update(STEP);
-  game.missions.messageTimer = 99;
-  if (SHOT === 2 && game.player.inCar) {
-    // Keep the driving shot moving: restore cruise speed after the settle.
-    game.player.inCar.speed = 300;
-  }
-  if (SHOT === 3) {
-    // The settle chase may have heated things up; restore the staged state.
-    game.player.hp = CONFIG.playerMaxHp;
-    game.wanted.heat = 80;
-    game.wanted.level = 3;
-    game.wanted.decayTimer = 99;
-  }
-  // Re-center the camera on the player after the settle moved things.
-  game.cam.x = clamp(game.player.x - CONFIG.canvasWidth / 2, 0, CONFIG.worldWidth - CONFIG.canvasWidth);
-  game.cam.y = clamp(game.player.y - CONFIG.canvasHeight / 2, 0, CONFIG.worldHeight - CONFIG.canvasHeight);
-  game.frozen = true;
-  render();
-}
 requestAnimationFrame(frame);
+window.__NEON_TIDE__ = { world: () => world, version: 'v2' };
