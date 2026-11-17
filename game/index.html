@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>NEON TIDE — Port Meridian Open-World Crime Game</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0b1020; overflow: hidden; }
+  #game { display: block; width: 100vw; height: 100vh; image-rendering: auto; cursor: crosshair; }
+  #fallback { color: #cfe3ff; font: 16px/1.5 system-ui, sans-serif; padding: 24px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<noscript><div id="fallback">NEON TIDE needs JavaScript enabled.</div></noscript>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
