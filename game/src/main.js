@@ -90,7 +90,7 @@ function endRun(kind) {
     playMissionComplete(game.audio);
     game.endScreen = {
       title: 'PORT MERIDIAN IS YOURS',
-      lines: ['All 4 missions complete. Dara Solace pays the final cut.', 'Kio Rendra owns the neon harbor tonight.'],
+      lines: ['All 4 missions complete. Dara Solace pays the final cut.', 'Kio Rendra owns Port Meridian tonight.'],
     };
   }
 }
